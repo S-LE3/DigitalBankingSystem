@@ -13,7 +13,7 @@ npm test
 Result:
 
 ```text
-15 tests passed
+17 tests passed
 0 failed
 0 cancelled
 ```

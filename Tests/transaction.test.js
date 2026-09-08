@@ -7,6 +7,7 @@ const app = require('../app');
 const User = require('../Models/userModel');
 const Account = require('../Models/accountModel');
 const Transaction = require('../Models/transactionModel');
+const nibssService = require('../Services/nibssService');
 const { generateAccountNumber } = require('../Utils/generateAccountNumber');
 
 // Configuration setup before tests execute
@@ -381,4 +382,90 @@ test('Digital Banking Fund Transfer Engine Matrix Validation', async t => {
       .set('Authorization', `Bearer ${loginRes.body.token}`);
     assert.strictEqual(protectedRes.statusCode, 401);
   });
+
+  await t.test(
+    'should link an existing provider account without creating one',
+    async () => {
+      const data = await setupTestData();
+      const originalListAccounts = nibssService.listAccounts;
+      const originalCreateAccount = nibssService.createAccount;
+      let createAccountCalled = false;
+
+      nibssService.listAccounts = async () => ({
+        data: {
+          accounts: [
+            {
+              accountNumber: '6421111111',
+              kycID: data.senderUser.bvn,
+              balance: 15000
+            }
+          ]
+        }
+      });
+      nibssService.createAccount = async () => {
+        createAccountCalled = true;
+        throw new Error('createAccount should not be called');
+      };
+
+      try {
+        await Account.deleteOne({ _id: data.senderAccount._id });
+        data.senderUser.account = null;
+        await data.senderUser.save();
+
+        const res = await request(app)
+          .post('/api/v1/users/account')
+          .set('Authorization', `Bearer ${data.token}`);
+
+        assert.strictEqual(res.statusCode, 200);
+        assert.strictEqual(res.body.data.account.accountNumber, '6421111111');
+        assert.strictEqual(createAccountCalled, false);
+      } finally {
+        nibssService.listAccounts = originalListAccounts;
+        nibssService.createAccount = originalCreateAccount;
+      }
+    }
+  );
+
+  await t.test(
+    'should persist a provider reference for external transfers',
+    async () => {
+      const data = await setupTestData();
+      const originalNameEnquiry = nibssService.nameEnquiry;
+      const originalTransfer = nibssService.transfer;
+
+      nibssService.nameEnquiry = async () => ({
+        data: { accountName: 'External Customer' }
+      });
+      nibssService.transfer = async () => ({
+        data: {
+          transactionId: 'TX-MOCK-001',
+          status: 'SUCCESS'
+        }
+      });
+
+      try {
+        const res = await request(app)
+          .post('/api/v1/transactions/transfer')
+          .set('Authorization', `Bearer ${data.token}`)
+          .send({
+            receivingAccountNumber: '7777777777',
+            amount: 100,
+            description: 'Mocked external transfer'
+          });
+
+        assert.strictEqual(res.statusCode, 201);
+        assert.strictEqual(
+          res.body.data.transaction.providerReference,
+          'TX-MOCK-001'
+        );
+        const transaction = await Transaction.findOne({
+          providerReference: 'TX-MOCK-001'
+        });
+        assert.strictEqual(transaction.status, 'success');
+      } finally {
+        nibssService.nameEnquiry = originalNameEnquiry;
+        nibssService.transfer = originalTransfer;
+      }
+    }
+  );
 });
